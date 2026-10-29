@@ -228,6 +228,7 @@ class SystemTimeWorker(ValkeyWorker):
             runner,
             platform_info,
             rtc_sysfs=settings.rtc_sysfs,
+            rtc_device=settings.rtc_device,
             battery_available=battery_provider.available(),
         )
         return ClockRuntime(

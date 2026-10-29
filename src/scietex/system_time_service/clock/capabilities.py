@@ -5,6 +5,7 @@ NTP daemon, and the process privilege level. The API and the UI read these to
 decide what to offer; the command layer re-checks them before mutating.
 """
 
+import os
 from pathlib import Path
 
 import msgspec
@@ -33,6 +34,7 @@ def detect_capabilities(
     platform_info: PlatformInfo,
     *,
     rtc_sysfs: str,
+    rtc_device: str,
     battery_available: bool,
     privileged: bool | None = None,
 ) -> Capabilities:
@@ -45,6 +47,11 @@ def detect_capabilities(
     timedatectl = has_binary("timedatectl")
     daemon = detect_ntp_daemon(runner)
     rtc_present = Path(rtc_sysfs, "since_epoch").exists()
+
+    # euid is not enough: a rootless container runs as uid 0 while the device
+    # node stays owned by an unmapped host group, so writes fail with EACCES.
+    # Probe the node itself so the UI does not offer a control that cannot work.
+    rtc_writable = rtc_present and os.access(rtc_device, os.R_OK | os.W_OK)
 
     # NTP servers can only be written where the platform has a drop-in
     # directory AND the running daemon reads one.
@@ -64,7 +71,7 @@ def detect_capabilities(
         ntp_controllable=timedatectl and daemon in {"chrony", "timesyncd"} and root,
         ntp_configurable=ntp_configurable,
         rtc_present=rtc_present,
-        rtc_writable=rtc_present and root,
+        rtc_writable=rtc_writable,
         battery_available=battery_available,
         privileged=root,
         platform_id=platform_info.platform_id,

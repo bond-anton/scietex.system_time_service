@@ -78,5 +78,6 @@ class ClockRuntime:
             self.runner,
             self.platform_info,
             rtc_sysfs=self.settings.rtc_sysfs,
+            rtc_device=self.settings.rtc_device,
             battery_available=self.battery_provider.available(),
         )
