@@ -18,6 +18,8 @@ sandbox.
 - `util-linux` for `hwclock` (only needed to write the RTC; on Debian trixie the
   binary is in `util-linux-extra`)
 - A reachable Valkey instance
+- For a rootless container: a polkit rule, or every clock write fails — see
+  [Polkit](#polkit-allowing-clock-changes-without-a-password-prompt)
 
 ## Install
 
@@ -276,6 +278,10 @@ A rootless deployment is possible but **degraded**. It is worth running when you
 want the host's timezone, clock and RTC state reported to the UI and do not need
 NTP control or RTC writes.
 
+Two host-side steps are required before any write works: a polkit rule (see
+[Polkit](#polkit-allowing-clock-changes-without-a-password-prompt)) and, for
+`--pid=host`, nothing else. The RTC device mapping below is optional.
+
 | Capability | Rootful | Rootless |
 | --- | --- | --- |
 | `timedatectl` reads | yes | yes, with `--pid=host` |
@@ -319,26 +325,83 @@ This buys RTC **reads** through the device node. Reads already worked via
 `/sys`, and writes remain impossible, so the practical gain is small. Skip it
 unless something needs the device node itself.
 
-#### Allowing clock changes without a password prompt
+#### Polkit: allowing clock changes without a password prompt
 
-`timedatectl` writes go through polkit, and every `timedate1` action defaults to
-`auth_admin_keep` — an interactive admin password. A rootless container's caller
-is the host user, not root, so each write blocks on a prompt that never arrives
-and the apply fails with `Access denied` after a few seconds.
+This is the one step a rootless deployment cannot skip. Without it the service
+reports the host clock correctly but every write fails, and the failure is
+reported in a way that points at the wrong layer.
 
-The symptom is easy to misread: the worker logs `Settings apply failed: timed
-out after 10.0s`, which looks like a slow command rather than a denied one.
-`journalctl -b | grep polkit` shows the real cause:
+**Why polkit is involved.** `timedatectl` does not write the clock itself. It
+asks `systemd-timedated` over D-Bus, and `timedated` asks polkit whether the
+caller may perform the action. Polkit answers from the action's policy file
+(`/usr/share/polkit-1/actions/org.freedesktop.timedate1.policy`), where all four
+write actions default to `auth_admin_keep`:
+
+| Action | Default | Worker uses it for |
+| --- | --- | --- |
+| `org.freedesktop.timedate1.set-timezone` | `auth_admin_keep` | `timezone` setting |
+| `org.freedesktop.timedate1.set-time` | `auth_admin_keep` | `POST /clock` |
+| `org.freedesktop.timedate1.set-ntp` | `auth_admin_keep` | `clock_source` setting, and `POST /clock` (it disables NTP first) |
+| `org.freedesktop.timedate1.set-local-rtc` | `auth_admin_keep` | `rtc_in_local_tz` setting |
+
+`auth_admin_keep` means "ask an administrator for a password, and cache the
+answer for a few minutes". That is correct for a desktop user clicking a
+settings panel. It is wrong for a background service, which has no session to
+prompt in.
+
+**Why rootless makes it worse.** A rootful container runs as real uid 0, which
+polkit authorizes without a prompt — a rootful `timedatectl set-timezone`
+completes in ~0.3 s. A rootless container's uid 0 is mapped to the host user
+(`/proc/self/uid_map` shows `0 1000 1`), so polkit sees the caller as that user
+— `anton`, not root. The user is in `wheel`, so polkit does not deny outright;
+it tries to prompt. The container image ships no polkit agent
+(`polkit-agent-helper-1`, `pkttyagent`), and the host's agent is bound to the
+user's graphical session, not to the container's D-Bus call — so the prompt is
+never rendered and the request eventually fails.
+
+**The misleading symptom.** The worker logs:
+
+```
+Settings apply failed: timed out after 10.0s
+```
+
+That reads like a slow command. It is not: `timedatectl` is blocked waiting for
+an authentication that will never arrive, and the worker's own 10 s command
+timeout fires first. Raising that timeout does not help — it only makes the
+failure take longer. The real cause is visible only in the polkit journal:
+
+```bash
+journalctl -b --no-pager | grep -i polkit | grep timedate1
+```
 
 ```
 polkitd[1332]: Operator of unix-session:23 FAILED to authenticate to gain
-authorization for action org.freedesktop.timedate1.set-timezone
+authorization for action org.freedesktop.timedate1.set-timezone for
+system-bus-name::1.4984 [<unknown>] (owned by unix-user:anton)
 ```
 
-Grant the worker's user the four actions it issues:
+`FAILED to authenticate` is the signature. If you see `Access denied` from
+`timedatectl` instead, the same rule fixes it — the difference is only whether
+polkit attempted a prompt or refused immediately.
+
+**Install the rule.** Polkit reads every `*.rules` file in
+`/etc/polkit-1/rules.d/` in lexical order and stops at the first rule that
+returns a result other than `NOT_HANDLED`. A file numbered below 50 is evaluated
+before the distribution's defaults, which is why the name starts with `49`.
 
 ```bash
 sudo tee /etc/polkit-1/rules.d/49-scietex-system-time.rules >/dev/null <<'EOF'
+// Allow the scietex system-time worker to manage the host clock without a
+// polkit password prompt.
+//
+// The worker runs in a rootless podman container, so polkit sees its caller as
+// the host user rather than root. Every timedatectl write therefore hits the
+// auth_admin_keep default and blocks on a prompt that never arrives, stalling
+// the apply until the task times out.
+//
+// Scoped to the four timedate1 actions the worker issues. It grants no general
+// admin rights: the user is already in wheel, so this only removes the
+// interactive prompt for clock changes.
 polkit.addRule(function (action, subject) {
     var clockActions = [
         "org.freedesktop.timedate1.set-timezone",
@@ -353,21 +416,62 @@ polkit.addRule(function (action, subject) {
 EOF
 ```
 
-Replace `anton` with the user running the quadlet. Polkit reloads `rules.d`
-automatically; no restart is needed. Verify from inside the container — it
-should return in well under a second with no prompt:
+Replace `anton` with the user that runs the quadlet — the same user whose
+`systemctl --user` starts the service. Find it with `id -un` in that user's
+shell. The file must be owned by root and mode 0644; `tee` under `sudo` gives
+you that.
+
+Polkit watches `rules.d` and reloads on write, so no restart is needed. If you
+want to be certain, `sudo systemctl restart polkit` is harmless.
+
+**Verify.** The rule is a host-wide grant, so test it from inside the container
+— that is the caller polkit actually sees:
 
 ```bash
 time podman exec system-time timedatectl set-timezone Europe/Moscow
 ```
 
-Without the rule, `set-timezone` takes ~5 s and fails with `Access denied`.
-With it, ~0.2 s and the host changes.
+Without the rule this takes ~5 s and prints `Failed to set time zone: Access
+denied`. With it, ~0.2 s, no output, and the host timezone changes. Confirm the
+host side independently:
 
-This grants the user, not the container: any process running as that user can
-change the clock. That is the same trust level the user already has through
-`wheel`, so it widens nothing in practice — but it is a host-wide grant, not a
-container-scoped one.
+```bash
+timedatectl show -p Timezone --value
+```
+
+Then exercise the full path through the API, which is what the UI uses:
+
+```bash
+curl -s -X PUT http://localhost:8000/api/v1/system-time/settings \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -H 'Origin: http://localhost:3000' \
+  -d '{"timezone":"Europe/Berlin"}'
+```
+
+A working deployment answers in about 2 s, the host timezone changes, and
+`podman logs system-time` shows no `timed out` or `requeue` lines. A broken one
+answers with `"detail": "worker did not apply: ..."` and the worker log carries
+the 10 s timeout.
+
+**Roll back.** Delete the file and polkit reverts to the distribution defaults
+on the next reload:
+
+```bash
+sudo rm /etc/polkit-1/rules.d/49-scietex-system-time.rules
+```
+
+**Security scope.** The rule grants the *user*, not the container. Polkit sees
+only the host uid of the D-Bus caller, so a container-scoped rule is not
+reliably expressible — any process running as that user can change the clock
+afterwards. In practice this widens nothing: the user is already in `wheel` and
+can do the same thing with `sudo timedatectl`. If the deployment user is *not*
+in `wheel`, the rule is a real privilege grant and should be reviewed as one.
+
+**Do not "fix" this with a longer timeout.** The framework's per-task timeout
+(`core.task_timeout`, default 3 s) and the worker's per-command timeout (10 s)
+both bound how long a blocked `timedatectl` may hang. Raising either only
+changes how long the failure takes to surface; the write still never happens.
+The polkit rule is the fix.
 
 #### Quadlet
 
