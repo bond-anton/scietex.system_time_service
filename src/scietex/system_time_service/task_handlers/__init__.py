@@ -72,7 +72,7 @@ class StatusHandler(_RuntimeHandler):
         snapshot = self.runtime.collect()
         telemetry = build_telemetry(
             service=self.context.service_name,
-            instance_id=self.context.worker_id,
+            instance_id=self.context.instance_id,
             clock=snapshot.clock,
             ntp=snapshot.ntp,
             rtc=snapshot.rtc,
