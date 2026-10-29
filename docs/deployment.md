@@ -61,6 +61,11 @@ Only `timezone`, `clock_source`, `ntp_servers`, `rtc_in_local_tz`, and
 `rtc_sync_interval_seconds` are patchable through the API. The rest are
 host-local and must be edited in the file.
 
+`rtc_device` is the node the service opens to write the RTC. The default
+`/dev/rtc0` matches a bare-metal install. A container that maps the host node
+onto `/dev/rtc` must set `rtc_device: /dev/rtc` to match — see
+[The RTC device path](#the-rtc-device-path).
+
 ### Battery provider
 
 `auto` picks the first provider that can answer for this host:
@@ -180,6 +185,38 @@ so the drift estimate stays consistent with the host's own `hwclock` runs. The
 file must already exist: podman creates a missing bind source as a *directory*,
 and `hwclock` then fails on it. Drop the mount if the host has never written one.
 
+### The RTC device path
+
+`--device /dev/rtc0:/dev/rtc` maps the host node onto **`/dev/rtc`**, not
+`/dev/rtc0`. The service's default `rtc_device` is `/dev/rtc0`, so a container
+deployment **must** override it in `system_time.yml`:
+
+```yaml
+rtc_device: /dev/rtc
+```
+
+Without that line the service probes a path that does not exist inside the
+container. RTC *reads* still work, because they go through
+`/sys/class/rtc/rtc0`, but `rtc_writable` reports `false` and the periodic sync
+is unavailable. `hwclock --systohc` is called with no `--rtc` and falls back to
+its built-in default, which is `/dev/rtc` — so the mapping and the config must
+agree.
+
+### What `rtc_writable` actually checks
+
+`rtc_writable` is true only when all three hold:
+
+1. `/sys/class/rtc/rtc0/since_epoch` exists (`rtc_present`),
+2. the process can open `rtc_device` read-write (`os.access`), and
+3. the effective capability set contains `CAP_SYS_TIME`.
+
+The third check exists because the kernel gates the `RTC_SET_TIME` ioctl on
+`CAP_SYS_TIME` in the **initial** user namespace. A rootless container can open
+the device node and still fail the write with `EPERM`, and `--cap-add SYS_TIME`
+does not help: the capability lands in `CapEff` but the ioctl is still refused,
+because the container's user namespace is not the initial one. Checking file
+permissions alone would report a writable RTC that cannot be written.
+
 ### Run
 
 ```bash
@@ -205,11 +242,11 @@ sudo podman run -d --name scietex-system-time \
 ```
 
 - **`--device /dev/rtc0:/dev/rtc` maps onto `/dev/rtc`, not `/dev/rtc0`.**
-  `hwclock --systohc` is called with no `--rtc` and falls back to its built-in
-  default, which is `/dev/rtc`. Mapping only `/dev/rtc0` leaves RTC *writes*
-  failing with `Cannot access the Hardware Clock via any known method` while
-  *reads* still work through `/sys` — a partially working service that looks
-  healthy until something depends on the RTC.
+  Set `rtc_device: /dev/rtc` in `system_time.yml` to match (see above).
+  Mapping only `/dev/rtc0` leaves RTC *writes* failing with
+  `Cannot access the Hardware Clock via any known method` while *reads* still
+  work through `/sys` — a partially working service that looks healthy until
+  something depends on the RTC.
 - On Debian, Ubuntu and Raspberry Pi OS hosts use
   `-v /etc/chrony/conf.d:/etc/chrony/conf.d:z` instead of the `/etc/chrony.d`
   line, and create that directory instead.
@@ -232,6 +269,97 @@ sudo podman run -d --name scietex-system-time \
   `is_raspberry_pi=False`. The chrony paths are identical, but the Pi-specific
   battery branch is skipped — set `battery_provider: command` explicitly in
   `system_time.yml` if the RTC cell is only reachable through a vendor tool.
+
+### Rootless podman (user quadlet)
+
+A rootless deployment is possible but **degraded**. It is worth running when you
+want the host's timezone, clock and RTC state reported to the UI and do not need
+NTP control or RTC writes.
+
+| Capability | Rootful | Rootless |
+| --- | --- | --- |
+| `timedatectl` reads | yes | yes, with `--pid=host` |
+| timezone set | yes | yes |
+| clock set | yes | yes |
+| RTC read | yes | yes (via `/sys`) |
+| RTC write | yes | **no** — `RTC_SET_TIME` needs `CAP_SYS_TIME` in the initial user namespace |
+| NTP control (`chronyc`) | yes | **no** — `/run/chrony` is `chrony:chrony 0750` |
+| NTP config (drop-ins) | yes | **no** — `/etc/chrony.d` is root-owned |
+| `ntp_daemon` detection | yes | **no** — `systemctl` needs `/run/systemd/private`, `srwx------` root-only |
+
+`--pid=host` is mandatory. Without it `timedatectl` fails with
+`Operation not permitted` even with `/run/dbus` mounted, because it prefers
+`/run/systemd/private` and does not fall back to the bus.
+
+#### Making the RTC device readable
+
+The device node is `root:clock` mode 0640. A rootless container's gid map is
+built from `/etc/subgid`, and the host's `clock` gid is normally outside that
+range, so the node appears as `nobody:nogroup` and `open()` fails with `EACCES`.
+Two root changes fix the read path:
+
+```bash
+sudo usermod -aG clock <user>
+echo '<user>:103:1' | sudo tee -a /etc/subgid
+```
+
+`103` is the host's `clock` gid — check with `getent group clock`. The
+`usermod` alone does nothing for the container; the `/etc/subgid` line is what
+puts the gid into the namespace map. After editing `/etc/subgid`, run
+`podman system migrate` so the running podman picks up the new mapping (it
+caches the map at startup). The group change also needs a fresh login session
+before `id -nG` shows it.
+
+With the mapping in place the container's gid map gains `1 -> 103`, and the
+device resolves to `nobody:daemon` (Debian's name for gid 1). The container
+process needs that gid in its supplementary set, so add `GroupAdd=1` to the
+quadlet — the container-side gid, not the host's 103.
+
+This buys RTC **reads** through the device node. Reads already worked via
+`/sys`, and writes remain impossible, so the practical gain is small. Skip it
+unless something needs the device node itself.
+
+#### Quadlet
+
+```ini
+[Unit]
+Description=System Time Service Container
+Requires=valkey.service
+After=valkey.service
+
+[Container]
+ContainerName=system-time
+Image=registry.buro-nts.ru/scietex-system-time-service:0.1.0
+# timedatectl reaches the host's systemd only through /run/systemd/private,
+# whose peer credentials cannot be resolved across a PID namespace. Without
+# --pid=host every call fails with EPERM even with the bus mounted.
+PodmanArgs=--pid=host
+# The container-side gid for the host's clock group, once /etc/subgid maps it.
+GroupAdd=1
+Volume=%h/.config/scietex-system-time:/config:z
+Volume=/run/systemd/system:/run/systemd/system:ro
+Volume=/run/dbus:/run/dbus:ro
+Volume=/etc/os-release:/etc/os-release:ro
+AutoUpdate=registry
+
+[Install]
+WantedBy=default.target
+```
+
+The config directory needs `system_time.yml` with `rtc_device: /dev/rtc` and a
+`valkey.yml` pointing at the host's Valkey. A rootless container reaches the
+host through `host.containers.internal`, not `localhost`:
+
+```yaml
+base_config:
+  nodes:
+    - host: host.containers.internal
+      port: 6379
+```
+
+Do not mount `/run/systemd/private` or `/run/chrony` in a rootless quadlet.
+Both are root-only, and mounting them read-only does not change that — the
+service reports `ntp_daemon: none` and `ntp_configurable: false` either way.
 
 ### Build
 
@@ -336,6 +464,10 @@ sudo mkdir -p /etc/chrony.d /etc/scietex /etc/systemd/timesyncd.conf.d
 sudo systemctl daemon-reload
 sudo systemctl start scietex-system-time.service
 ```
+
+Set `rtc_device: /dev/rtc` in `/etc/scietex/system_time/system_time.yml` to
+match `AddDevice=/dev/rtc0:/dev/rtc`; the default `/dev/rtc0` does not exist
+inside the container.
 
 `PodmanArgs=--pid=host` is required because Quadlet has no dedicated key for the
 PID namespace; `After=chronyd.service` only orders the container against the

@@ -175,5 +175,32 @@ def is_privileged() -> bool:
     return os.geteuid() == 0
 
 
+#: ``CAP_SYS_TIME`` is bit 25 of the capability bitmask.
+CAP_SYS_TIME = 25
+
+PROC_STATUS_PATH = Path("/proc/self/status")
+
+
+def has_cap_sys_time(status_path: Path = PROC_STATUS_PATH) -> bool:
+    """Whether the effective capability set includes ``CAP_SYS_TIME``.
+
+    The RTC ``RTC_SET_TIME`` ioctl is gated on this capability in the *initial*
+    user namespace, so a rootless container fails the write even when the
+    device node is writable. File permissions alone cannot detect that.
+    """
+    try:
+        text = status_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    for line in text.splitlines():
+        if line.startswith("CapEff:"):
+            try:
+                mask = int(line.split(":", 1)[1].strip(), 16)
+            except ValueError:
+                return False
+            return bool(mask & (1 << CAP_SYS_TIME))
+    return False
+
+
 def has_binary(name: str) -> bool:
     return shutil.which(name) is not None

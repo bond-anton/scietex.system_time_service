@@ -10,7 +10,13 @@ from pathlib import Path
 
 import msgspec
 
-from .platform import PlatformInfo, detect_ntp_daemon, has_binary, is_privileged
+from .platform import (
+    PlatformInfo,
+    detect_ntp_daemon,
+    has_binary,
+    has_cap_sys_time,
+    is_privileged,
+)
 
 
 class Capabilities(msgspec.Struct, frozen=True):
@@ -37,21 +43,26 @@ def detect_capabilities(
     rtc_device: str,
     battery_available: bool,
     privileged: bool | None = None,
+    cap_sys_time: bool | None = None,
 ) -> Capabilities:
     """Probe the host and return its capability set.
 
-    ``privileged`` is injectable so tests can exercise both branches without
-    running as root.
+    ``privileged`` and ``cap_sys_time`` are injectable so tests can exercise
+    every branch without running as root or holding the capability.
     """
     root = is_privileged() if privileged is None else privileged
     timedatectl = has_binary("timedatectl")
     daemon = detect_ntp_daemon(runner)
     rtc_present = Path(rtc_sysfs, "since_epoch").exists()
+    can_set_rtc = has_cap_sys_time() if cap_sys_time is None else cap_sys_time
 
     # euid is not enough: a rootless container runs as uid 0 while the device
     # node stays owned by an unmapped host group, so writes fail with EACCES.
-    # Probe the node itself so the UI does not offer a control that cannot work.
-    rtc_writable = rtc_present and os.access(rtc_device, os.R_OK | os.W_OK)
+    # File access is not enough either: RTC_SET_TIME is gated on CAP_SYS_TIME
+    # in the initial user namespace, which a rootless container cannot hold.
+    rtc_writable = (
+        rtc_present and os.access(rtc_device, os.R_OK | os.W_OK) and can_set_rtc
+    )
 
     # NTP servers can only be written where the platform has a drop-in
     # directory AND the running daemon reads one.
