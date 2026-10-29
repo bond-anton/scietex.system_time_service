@@ -1,0 +1,17 @@
+# The build context is the checkout: the package is not published, so the image
+# installs the local source and needs only pyproject.toml, README.md and src/.
+# Everything listed here is development state or build output.
+.git/
+.venv/
+.tox/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+**/__pycache__/
+**/*.pyc
+**/*.egg-info/
+build/
+dist/
+tests/
+docs/
+.coverage

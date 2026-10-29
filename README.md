@@ -24,9 +24,23 @@ Dry run against the current host without changing anything:
 ## Documentation
 
 - [`docs/deployment.md`](docs/deployment.md) — install, configuration, platform
-  support, systemd unit, dry run.
+  support, systemd unit, container (Podman), dry run.
 - [`docs/wire-contract.md`](docs/wire-contract.md) — Valkey keys, telemetry
   structs, tasks, error codes.
+
+## Container
+
+A `Containerfile` is included. The image installs the checkout (the package is
+not on PyPI), runs as root with no `USER` directive, and expects the host's
+systemd, D-Bus, chrony socket, `/etc/os-release` and RTC to be mounted in:
+
+```bash
+podman build --build-arg VERSION=0.1.0 -t scietex-system-time-service:dev .
+```
+
+It is a **privileged host agent**, not a sandbox: `sudo podman`, `--pid=host`,
+and the mount list in [Deployment](docs/deployment.md#container-podman) are all
+required. Rootless podman cannot open `/dev/rtc0` or `/run/systemd/private`.
 
 ## Layout
 
