@@ -1,0 +1,52 @@
+"""Fixtures captured from a real Fedora 44 host running chrony 4.9."""
+
+TIMEDATECTL_SHOW = """Timezone=Europe/Moscow
+LocalRTC=no
+CanNTP=yes
+NTP=yes
+NTPSynchronized=yes
+TimeUSec=Thu 2026-10-29 12:44:19 MSK
+RTCTimeUSec=Thu 2026-10-29 09:44:20 UTC
+"""
+
+CHRONYC_TRACKING_CSV = (
+    "A29FC87B,162.159.200.123,4,1793267004.811222297,0.000120549,-0.000054753,"
+    "0.000201904,-6.283,0.001,0.071,0.014327865,0.000290110,129.5,Normal\n"
+)
+
+CHRONYC_SOURCES_CSV = """^,-,95.216.100.21,3,9,377,112,0.000217738,0.000161754,0.049175091
+^,*,162.159.200.123,3,8,377,52,-0.000199031,-0.000253784,0.007549062
+^,+,162.159.200.1,3,9,377,313,0.000609459,0.000543991,0.007597590
+"""
+
+OS_RELEASE_FEDORA = """NAME="Fedora Linux"
+VERSION="44 (Workstation Edition)"
+ID=fedora
+VERSION_ID=44
+"""
+
+OS_RELEASE_UBUNTU_24 = """NAME="Ubuntu"
+VERSION="24.04.1 LTS (Noble Numbat)"
+ID=ubuntu
+VERSION_ID="24.04"
+ID_LIKE=debian
+"""
+
+OS_RELEASE_UBUNTU_22 = """NAME="Ubuntu"
+VERSION="22.04.4 LTS (Jammy Jellyfish)"
+ID=ubuntu
+VERSION_ID="22.04"
+ID_LIKE=debian
+"""
+
+OS_RELEASE_DEBIAN = """NAME="Debian GNU/Linux"
+VERSION="12 (bookworm)"
+ID=debian
+VERSION_ID="12"
+"""
+
+OS_RELEASE_ARCH = """NAME="Arch Linux"
+ID=arch
+"""
+
+RPI_MODEL = "Raspberry Pi 5 Model B Rev 1.0"
