@@ -279,8 +279,8 @@ NTP control or RTC writes.
 | Capability | Rootful | Rootless |
 | --- | --- | --- |
 | `timedatectl` reads | yes | yes, with `--pid=host` |
-| timezone set | yes | yes |
-| clock set | yes | yes |
+| timezone set | yes | yes, with a polkit rule (see below) |
+| clock set | yes | yes, with a polkit rule (see below) |
 | RTC read | yes | yes (via `/sys`) |
 | RTC write | yes | **no** — `RTC_SET_TIME` needs `CAP_SYS_TIME` in the initial user namespace |
 | NTP control (`chronyc`) | yes | **no** — `/run/chrony` is `chrony:chrony 0750` |
@@ -318,6 +318,56 @@ quadlet — the container-side gid, not the host's 103.
 This buys RTC **reads** through the device node. Reads already worked via
 `/sys`, and writes remain impossible, so the practical gain is small. Skip it
 unless something needs the device node itself.
+
+#### Allowing clock changes without a password prompt
+
+`timedatectl` writes go through polkit, and every `timedate1` action defaults to
+`auth_admin_keep` — an interactive admin password. A rootless container's caller
+is the host user, not root, so each write blocks on a prompt that never arrives
+and the apply fails with `Access denied` after a few seconds.
+
+The symptom is easy to misread: the worker logs `Settings apply failed: timed
+out after 10.0s`, which looks like a slow command rather than a denied one.
+`journalctl -b | grep polkit` shows the real cause:
+
+```
+polkitd[1332]: Operator of unix-session:23 FAILED to authenticate to gain
+authorization for action org.freedesktop.timedate1.set-timezone
+```
+
+Grant the worker's user the four actions it issues:
+
+```bash
+sudo tee /etc/polkit-1/rules.d/49-scietex-system-time.rules >/dev/null <<'EOF'
+polkit.addRule(function (action, subject) {
+    var clockActions = [
+        "org.freedesktop.timedate1.set-timezone",
+        "org.freedesktop.timedate1.set-local-rtc",
+        "org.freedesktop.timedate1.set-ntp",
+        "org.freedesktop.timedate1.set-time"
+    ];
+    if (clockActions.indexOf(action.id) !== -1 && subject.user === "anton") {
+        return polkit.Result.YES;
+    }
+});
+EOF
+```
+
+Replace `anton` with the user running the quadlet. Polkit reloads `rules.d`
+automatically; no restart is needed. Verify from inside the container — it
+should return in well under a second with no prompt:
+
+```bash
+time podman exec system-time timedatectl set-timezone Europe/Moscow
+```
+
+Without the rule, `set-timezone` takes ~5 s and fails with `Access denied`.
+With it, ~0.2 s and the host changes.
+
+This grants the user, not the container: any process running as that user can
+change the clock. That is the same trust level the user already has through
+`wheel`, so it widens nothing in practice — but it is a host-wide grant, not a
+container-scoped one.
 
 #### Quadlet
 
