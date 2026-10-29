@@ -31,6 +31,8 @@ class SystemTimeTelemetry(msgspec.Struct):
     clock_source: str
     pending_apply: bool = False
     last_error: str | None = None
+    last_rtc_sync_at: datetime | None = None
+    last_rtc_sync_error: str | None = None
     timestamp: datetime = msgspec.field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
@@ -49,6 +51,8 @@ def build_telemetry(
     clock_source: str,
     pending_apply: bool,
     last_error: str | None,
+    last_rtc_sync_at: datetime | None,
+    last_rtc_sync_error: str | None,
 ) -> SystemTimeTelemetry:
     return SystemTimeTelemetry(
         service=service,
@@ -61,4 +65,6 @@ def build_telemetry(
         clock_source=clock_source,
         pending_apply=pending_apply,
         last_error=last_error,
+        last_rtc_sync_at=last_rtc_sync_at,
+        last_rtc_sync_error=last_rtc_sync_error,
     )

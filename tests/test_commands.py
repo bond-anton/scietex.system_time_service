@@ -23,6 +23,7 @@ def _caps(**overrides) -> Capabilities:
         "ntp_controllable": True,
         "ntp_configurable": True,
         "rtc_present": True,
+        "rtc_writable": True,
         "battery_available": False,
         "privileged": True,
         "platform_id": "fedora",
@@ -138,6 +139,14 @@ def test_set_clock_writes_rtc_when_requested() -> None:
     commands.set_clock(runner, _caps(), 1793000000.0, write_rtc=True)
 
     assert runner.recorded[-1] == ["hwclock", "--systohc", "--utc"]
+
+
+def test_set_clock_writes_rtc_in_local_tz_when_configured() -> None:
+    """The hwclock flag must follow systemd's LocalRTC setting."""
+    runner = RecordingCommandRunner()
+    commands.set_clock(runner, _caps(), 1793000000.0, write_rtc=True, in_local_tz=True)
+
+    assert runner.recorded[-1] == ["hwclock", "--systohc", "--localtime"]
 
 
 def test_set_clock_stops_when_ntp_disable_fails() -> None:

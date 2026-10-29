@@ -21,6 +21,7 @@ class Capabilities(msgspec.Struct, frozen=True):
     ntp_controllable: bool
     ntp_configurable: bool
     rtc_present: bool
+    rtc_writable: bool
     battery_available: bool
     privileged: bool
     platform_id: str
@@ -63,6 +64,7 @@ def detect_capabilities(
         ntp_controllable=timedatectl and daemon in {"chrony", "timesyncd"} and root,
         ntp_configurable=ntp_configurable,
         rtc_present=rtc_present,
+        rtc_writable=rtc_present and root,
         battery_available=battery_available,
         privileged=root,
         platform_id=platform_info.platform_id,

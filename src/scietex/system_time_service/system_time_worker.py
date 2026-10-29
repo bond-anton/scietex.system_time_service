@@ -8,6 +8,8 @@ telemetry instead.
 
 import asyncio
 import logging
+import time
+from datetime import datetime, timezone
 
 import msgspec
 from glide import ConnectionError as GlideConnectionError
@@ -19,14 +21,19 @@ from .clock import commands
 from .clock.battery import resolve_provider
 from .clock.capabilities import detect_capabilities
 from .clock.platform import detect_platform
-from .clock.runner import CommandResult, DryRunCommandRunner, RealCommandRunner
+from .clock.runner import (
+    DRY_RUN,
+    CommandResult,
+    DryRunCommandRunner,
+    RealCommandRunner,
+)
 from .config import (
     SYSTEM_TIME_SECTION,
     SYSTEM_TIME_SETTINGS_DEFAULTS,
     SystemTimeSettings,
     read_system_time_config,
 )
-from .runtime import ClockRuntime
+from .runtime import ClockRuntime, ClockSnapshot
 from .task_handlers import (
     APPLY_TASK,
     READ_RTC_TASK,
@@ -48,6 +55,15 @@ READ_ONLY_PREFIXES: tuple[tuple[str, ...], ...] = (
     ("chronyc", "-c", "sources"),
     ("systemctl", "is-active"),
 )
+
+#: The interval is remote, so the loop re-reads it every tick instead of
+#: sleeping the whole interval; otherwise shrinking 24 h -> 5 min would take
+#: 24 h to take effect. TICK also bounds how long a disable takes to apply.
+RTC_SYNC_TICK: float = 5.0
+
+#: sysfs reports the RTC at one-second resolution, so anything within a few
+#: seconds is measurement noise; rewriting it would be pure churn.
+RTC_SYNC_TOLERANCE_SECONDS: float = 5.0
 
 
 def apply_settings(runtime: ClockRuntime) -> CommandResult:
@@ -88,6 +104,76 @@ def apply_settings(runtime: ClockRuntime) -> CommandResult:
     return CommandResult(ok=True)
 
 
+class RtcSyncOutcome(msgspec.Struct, frozen=True):
+    """Result of one sync attempt. ``attempted`` is False for a deliberate skip."""
+
+    attempted: bool
+    written: bool = False
+    error: str | None = None
+
+
+def rtc_sync_offset(snapshot: ClockSnapshot) -> float | None:
+    """RTC minus system clock, corrected for a local-time RTC.
+
+    sysfs ``since_epoch`` interprets the RTC registers as UTC regardless of
+    systemd's LocalRTC setting, so a local-time RTC reports the UTC offset as
+    drift.
+    """
+    if snapshot.rtc.drift_seconds is None:
+        return None
+    expected = (
+        float(snapshot.clock.utc_offset_seconds or 0)
+        if snapshot.clock.rtc_in_local_tz
+        else 0.0
+    )
+    return snapshot.rtc.drift_seconds - expected
+
+
+def sync_rtc(runtime: ClockRuntime) -> RtcSyncOutcome:
+    """Copy the system clock into the RTC if it is worth doing. Never raises."""
+    settings = runtime.settings
+    if settings.rtc_sync_interval_seconds is None:
+        return RtcSyncOutcome(attempted=False)
+
+    caps = runtime.capabilities
+    if not caps.rtc_writable:
+        # No error: an unprivileged or RTC-less host would otherwise carry a
+        # permanent red error for a feature it can never use. The UI gates the
+        # control on ``rtc_writable``.
+        return RtcSyncOutcome(attempted=False)
+
+    snapshot = runtime.collect()
+
+    if settings.clock_source == "auto" and not snapshot.ntp.synchronized:
+        # While NTP is still converging the system clock may be the wrong one,
+        # and writing it would destroy a correct RTC. This is the one place a
+        # sync can do harm.
+        return RtcSyncOutcome(attempted=False)
+
+    offset = rtc_sync_offset(snapshot)
+    if offset is not None and abs(offset) <= RTC_SYNC_TOLERANCE_SECONDS:
+        # A confirmed-in-sync pass counts as a successful sync: the RTC holds
+        # the right time, which is what the interval promises.
+        runtime.last_rtc_sync_at = datetime.now(timezone.utc)
+        runtime.last_rtc_sync_error = None
+        return RtcSyncOutcome(attempted=False, written=False)
+
+    result = commands.write_rtc_from_system(
+        runtime.runner, caps, in_local_tz=settings.rtc_in_local_tz
+    )
+    if result.ok:
+        runtime.last_rtc_sync_at = datetime.now(timezone.utc)
+        runtime.last_rtc_sync_error = DRY_RUN if result.error_code == DRY_RUN else None
+        return RtcSyncOutcome(attempted=True, written=True)
+
+    # ``last_rtc_sync_at`` keeps its previous value: it means "last time it
+    # worked", not "last time it ran".
+    runtime.last_rtc_sync_error = result.stderr or result.error_code
+    return RtcSyncOutcome(
+        attempted=True, written=False, error=runtime.last_rtc_sync_error
+    )
+
+
 class SystemTimeWorker(ValkeyWorker):
     """Valkey worker that owns the host clock."""
 
@@ -107,6 +193,7 @@ class SystemTimeWorker(ValkeyWorker):
             f"scietex:{self.service_name}:{self.instance_id}:telemetry"
         )
         self._startup_complete = False
+        self._rtc_sync_due: float | None = None
 
         self.register_config_settings(
             SYSTEM_TIME_SECTION,
@@ -213,6 +300,8 @@ class SystemTimeWorker(ValkeyWorker):
                     clock_source=self._runtime.settings.clock_source,
                     pending_apply=self._runtime.pending_apply,
                     last_error=self._runtime.last_error,
+                    last_rtc_sync_at=self._runtime.last_rtc_sync_at,
+                    last_rtc_sync_error=self._runtime.last_rtc_sync_error,
                 )
                 await client.set(
                     self._telemetry_key,
@@ -225,12 +314,51 @@ class SystemTimeWorker(ValkeyWorker):
                 )
         await asyncio.sleep(TELEMETRY_INTERVAL)
 
+    @Manager(name="RtcSync")
+    async def rtc_sync_loop(self) -> None:
+        """Write the system clock into the RTC on the configured interval."""
+        while True:
+            runtime = self._runtime
+            if runtime is None:
+                await asyncio.sleep(RTC_SYNC_TICK)
+                continue
+
+            interval = runtime.settings.rtc_sync_interval_seconds
+            if interval is None:
+                self._rtc_sync_due = None
+                await asyncio.sleep(RTC_SYNC_TICK)
+                continue
+
+            now = time.monotonic()
+            if self._rtc_sync_due is None or self._rtc_sync_due - now > interval:
+                # First sync waits a full interval, so startup never writes on
+                # its own; a shrunken interval re-clamps here instead of
+                # waiting out the old one.
+                self._rtc_sync_due = now + interval
+
+            wait = self._rtc_sync_due - now
+            if wait <= 0:
+                self._rtc_sync_due = now + interval
+                try:
+                    sync_rtc(runtime)
+                except Exception as exc:  # noqa: BLE001 - keeps the manager alive
+                    # A raise would burn the manager's retry budget; commands
+                    # never raises, but ``collect`` touches sysfs and zoneinfo.
+                    runtime.last_rtc_sync_error = str(exc)
+                    self.logger.warning("RTC sync failed: %s", exc)
+                continue
+
+            await asyncio.sleep(min(wait, RTC_SYNC_TICK))
+
 
 __all__ = [
     "APPLY_TASK",
     "READ_RTC_TASK",
     "SET_CLOCK_TASK",
     "STATUS_TASK",
+    "RtcSyncOutcome",
     "SystemTimeWorker",
     "apply_settings",
+    "rtc_sync_offset",
+    "sync_rtc",
 ]

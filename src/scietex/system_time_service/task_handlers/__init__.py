@@ -81,6 +81,8 @@ class StatusHandler(_RuntimeHandler):
             clock_source=self.runtime.settings.clock_source,
             pending_apply=self.runtime.pending_apply,
             last_error=self.runtime.last_error,
+            last_rtc_sync_at=self.runtime.last_rtc_sync_at,
+            last_rtc_sync_error=self.runtime.last_rtc_sync_error,
         )
         return TaskResult(status="success", payload=msgspec.msgpack.encode(telemetry))
 
@@ -162,6 +164,7 @@ class SetClockHandler(_RuntimeHandler):
             self.runtime.capabilities,
             request.epoch_seconds,
             write_rtc=request.write_rtc,
+            in_local_tz=self.runtime.settings.rtc_in_local_tz,
         )
         self.runtime.last_error = (
             None if result.ok else (result.stderr or result.error_code)

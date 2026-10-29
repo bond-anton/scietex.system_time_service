@@ -134,7 +134,12 @@ def write_ntp_servers(
 
 
 def set_clock(
-    runner: CommandRunner, caps: Capabilities, epoch_seconds: float, *, write_rtc: bool
+    runner: CommandRunner,
+    caps: Capabilities,
+    epoch_seconds: float,
+    *,
+    write_rtc: bool,
+    in_local_tz: bool = False,
 ) -> CommandResult:
     """Set the system clock to an absolute instant.
 
@@ -159,19 +164,28 @@ def set_clock(
         return applied
 
     if write_rtc:
-        return write_rtc_from_system(runner, caps)
+        return write_rtc_from_system(runner, caps, in_local_tz=in_local_tz)
     return applied
 
 
-def write_rtc_from_system(runner: CommandRunner, caps: Capabilities) -> CommandResult:
-    """Copy the system clock into the RTC."""
+def write_rtc_from_system(
+    runner: CommandRunner, caps: Capabilities, *, in_local_tz: bool = False
+) -> CommandResult:
+    """Copy the system clock into the RTC.
+
+    The ``--localtime``/``--utc`` flag has to match what
+    ``timedatectl set-local-rtc`` told systemd. ``hwclock`` writes the system
+    time into the RTC registers interpreted through that flag, so a mismatch
+    stores a time the boot path re-reads shifted by the UTC offset.
+    """
     if not caps.rtc_present:
         return CommandResult(
             ok=False, error_code=RTC_UNAVAILABLE, stderr="no RTC on this host"
         )
     if not caps.privileged:
         return _denied()
-    return runner.run(["hwclock", "--systohc", "--utc"], timeout=10.0)
+    flag = "--localtime" if in_local_tz else "--utc"
+    return runner.run(["hwclock", "--systohc", flag], timeout=10.0)
 
 
 def set_rtc_in_local_tz(

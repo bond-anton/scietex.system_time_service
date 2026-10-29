@@ -40,6 +40,7 @@ ntp_servers:
   - 0.pool.ntp.org
   - 1.pool.ntp.org
 rtc_in_local_tz: false
+rtc_sync_interval_seconds: null  # 60..86400, null disables the periodic RTC write
 
 # Host-local tuning, never delivered remotely.
 status_interval: 5.0
@@ -50,9 +51,9 @@ battery_command: null
 battery_command_timeout: 3.0
 ```
 
-Only `timezone`, `clock_source`, `ntp_servers`, and `rtc_in_local_tz` are
-patchable through the API. The rest are host-local and must be edited in the
-file.
+Only `timezone`, `clock_source`, `ntp_servers`, `rtc_in_local_tz`, and
+`rtc_sync_interval_seconds` are patchable through the API. The rest are
+host-local and must be edited in the file.
 
 ### Battery provider
 

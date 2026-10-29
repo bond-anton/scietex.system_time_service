@@ -6,7 +6,7 @@ host-local and come from ``system_time.yml``.
 """
 
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 import msgspec
 
@@ -14,8 +14,18 @@ SYSTEM_TIME_SECTION: str = "system_time"
 SYSTEM_TIME_CONFIG_SUBDIR: str = "system_time"
 SYSTEM_TIME_CONFIG_FILE: str = "system_time.yml"
 
+#: Bounds on the periodic RTC write. Below a minute the write is pure churn;
+#: above a day an RTC drifts visibly between syncs.
+RTC_SYNC_MIN_INTERVAL_SECONDS: int = 60
+RTC_SYNC_MAX_INTERVAL_SECONDS: int = 86_400
+
 ClockSource = Literal["auto", "manual"]
 BatteryProviderName = Literal["auto", "none", "sysfs", "command"]
+
+RtcSyncInterval = Annotated[
+    int,
+    msgspec.Meta(ge=RTC_SYNC_MIN_INTERVAL_SECONDS, le=RTC_SYNC_MAX_INTERVAL_SECONDS),
+]
 
 
 class SystemTimeSettings(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -30,8 +40,12 @@ class SystemTimeSettings(msgspec.Struct, frozen=True, forbid_unknown_fields=True
     ntp_servers: list[str] = msgspec.field(default_factory=list)
     rtc_in_local_tz: bool = False
 
+    #: None disables the periodic RTC write. Remote: it is a product decision,
+    #: not host tuning.
+    rtc_sync_interval_seconds: RtcSyncInterval | None = None
+
     # Host-local tuning. Never delivered remotely: the API's config patch only
-    # carries the four desired-state fields above.
+    # carries the five desired-state fields above.
     status_interval: float = 5.0
     rtc_device: str = "/dev/rtc0"
     rtc_sysfs: str = "/sys/class/rtc/rtc0"
@@ -42,9 +56,16 @@ class SystemTimeSettings(msgspec.Struct, frozen=True, forbid_unknown_fields=True
 
 SYSTEM_TIME_SETTINGS_DEFAULTS = SystemTimeSettings()
 
-#: Fields the API may patch remotely. Anything else is host-local.
+#: Fields the API may patch remotely. Documentation only: the enforcing gate is
+#: ``forbid_unknown_fields`` on the struct, not this set.
 REMOTE_FIELDS: frozenset[str] = frozenset(
-    {"timezone", "clock_source", "ntp_servers", "rtc_in_local_tz"}
+    {
+        "timezone",
+        "clock_source",
+        "ntp_servers",
+        "rtc_in_local_tz",
+        "rtc_sync_interval_seconds",
+    }
 )
 
 

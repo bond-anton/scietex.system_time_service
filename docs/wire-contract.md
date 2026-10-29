@@ -13,7 +13,7 @@ worker start.
 Key: `scietex:SystemTime:config`
 
 The framework's `ConfigEnvelope` with a `services["system_time"]` section. The
-API patches only these four fields; a three-state merge applies (absent = leave
+API patches only these five fields; a three-state merge applies (absent = leave
 alone, `null` = clear, value = set):
 
 | Field | Type | Meaning |
@@ -22,6 +22,10 @@ alone, `null` = clear, value = set):
 | `clock_source` | `"auto" \| "manual"` | `auto` = NTP, `manual` = operator sets the clock |
 | `ntp_servers` | `list[str]` | NTP server hostnames |
 | `rtc_in_local_tz` | `bool` | whether the RTC stores local time |
+| `rtc_sync_interval_seconds` | `int \| null` | seconds between RTC writes; `null` disables |
+
+`rtc_sync_interval_seconds` accepts 60 through 86400 inclusive; anything else
+fails config resolution before the host is touched.
 
 ## Telemetry
 
@@ -41,9 +45,16 @@ SystemTimeTelemetry
   clock_source: str
   pending_apply: bool
   last_error: str | null
+  last_rtc_sync_at: datetime | null
+  last_rtc_sync_error: str | null
   timestamp: datetime
   schema_version: int = 1
 ```
+
+`last_rtc_sync_at`/`last_rtc_sync_error` are worker state, not RTC readings, so
+they sit at the top level next to `last_error`. A pass that finds the RTC
+already within tolerance still counts as a successful sync and updates
+`last_rtc_sync_at` without running `hwclock`.
 
 ### ClockStatus
 
@@ -115,6 +126,7 @@ clock_settable: bool
 ntp_controllable: bool
 ntp_configurable: bool
 rtc_present: bool
+rtc_writable: bool
 battery_available: bool
 privileged: bool
 platform_id: str

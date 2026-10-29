@@ -5,6 +5,8 @@ handlers see the same runner, platform and capability snapshot the telemetry
 loop uses. Handlers are re-instantiated on restart; the injected object is not.
 """
 
+from datetime import datetime
+
 import msgspec
 
 from .clock.battery import BatteryStatus, RtcBatteryProvider
@@ -25,7 +27,12 @@ class ClockSnapshot(msgspec.Struct, frozen=True):
 
 
 class ClockRuntime:
-    """Mutable state shared by the worker and its task handlers."""
+    """Mutable state shared by the worker and its task handlers.
+
+    ``last_rtc_sync_at``/``last_rtc_sync_error`` are in-memory and reset on
+    worker restart. Telemetry is live state, so a value that survives the
+    process that produced it would be a lie.
+    """
 
     def __init__(
         self,
@@ -44,6 +51,8 @@ class ClockRuntime:
         self.snapshot: ClockSnapshot | None = None
         self.pending_apply: bool = False
         self.last_error: str | None = None
+        self.last_rtc_sync_at: datetime | None = None
+        self.last_rtc_sync_error: str | None = None
 
     def collect(self) -> ClockSnapshot:
         """Read the host clock state and cache it."""
